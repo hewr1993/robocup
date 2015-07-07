@@ -1,0 +1,17 @@
+CC=gcc
+
+all: videocap
+
+videocap: process.o cap2_net.o jpegdec.o
+	$(CC) -o videocap process.o cap2_net.o jpegdec.o
+
+process.o:process.c process.h cmv.h
+	$(CC) -c process.c
+
+jpegdec.o:jpegdec.c jpegdec.h
+	$(CC) -c jpegdec.c
+
+cap2_net.o:cap2_net.c cap2_net.h
+	$(CC) -c cap2_net.c
+
+

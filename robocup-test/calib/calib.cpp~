@@ -1,0 +1,811 @@
+#include "cxcore.h"
+#include "cv.h"
+#include "highgui.h"
+
+#include <math.h>
+#include <pthread.h>
+
+#include "global.h"
+#include "save.h"
+#include "cvt.h"
+#include "net.h"
+#include "dec.h"
+#include "cmv.h"
+
+#define LOC_LEFT 2000
+#define LOC_RIGHT -2000
+#define LOC_INVALID -10000 
+#define LOC_CATCH_BALL 10000
+#define LOC_Y_FAR    2000
+#define LOC_Y_INVALID 9999
+#define LOC_Y_NEAR   1000
+#define LOC_Y_VERY_NEAR 500
+//Define the Net referance parameter (CM)
+#define NET_X_LOC 0
+#define NET_Y_LOC 50
+#define NET_W 5
+#define NET_H 5
+
+extern "C" { 
+   #include "jpegdec.h"
+ }
+
+extern "C" {
+	unsigned char *process(int argc, char *argv[]);
+}
+
+extern int use_cmv1;
+extern int use_cmv2;
+extern struct cmv_data data1;
+extern struct cmv_data data2;
+extern struct net ns1, ns2;
+
+extern int DataInputMode;
+
+unsigned char* src;
+
+int idLeft = 1;
+int idRight = 2;
+CvPoint bndLeftStart = cvPoint(0, 0);
+CvPoint bndLeftEnd = cvPoint(W, H);
+
+CvPoint bndRightStart = cvPoint(0, 0);
+CvPoint bndRightEnd = cvPoint(W, H);
+CvPoint2D32f finded[45];
+int findedcount=45;
+int n = 0;
+int i1 = 0, i2 = 0;
+char filename[24];
+
+#define MAX_MJPEG_SIZE 200000
+#define MAX_NET_WIDTH	320
+#define MAX_NET_HEIGHT 240
+#define MAX_POINTS 60
+
+unsigned char raw_buf1[MAX_MJPEG_SIZE];
+unsigned char raw_buf2[MAX_MJPEG_SIZE];
+unsigned char yuv_buf1[YUV_SIZE];
+unsigned char yuv_buf2[YUV_SIZE];
+int l_x1, l_x2, r_x1, r_x2;
+int l_y1, l_y2, r_y1, r_y2;
+struct spot l_l, l_r, r_l, r_r;
+
+struct spot left[MAX_LINES];
+struct spot right[MAX_LINES];
+int line_count;
+
+struct spot l_center, r_center;
+int l_ball_radius, r_ball_radius;
+
+//***********PointInRectangle
+typedef struct
+{
+	int Amn_Point;
+	CvPoint* Bnd_Point;
+} Bnd_List;
+
+typedef struct
+{
+	int Min_x, Min_y, Max_x, Max_y;
+} Rect_t;
+//************
+
+CvMat * Tran_Mat= cvCreateMat(8, 1, CV_64FC1);
+
+const char *tfile = "translate.conf";
+float vparam[2][8];
+
+IplImage *ImageDisplay=0;
+IplImage *Image1=0;
+IplImage *Image2=0;
+IplImage *grey1=0;
+IplImage *grey2=0;
+
+
+void get_data();
+void* get_data1(void *);
+void* get_data2(void *);
+
+/******************jpeg2yuv start*****************************/
+int clamp (double x) {
+        int r = x;      /* round to nearest */
+        if (r < 0)         return 0;
+        else if (r > 255)  return 255;
+        else               return r;
+}
+
+static inline unsigned char sat(int c) {
+	return( (c & ~255)? (c<0)?0:255 : c );
+}
+
+void yuv2Ipl(const unsigned char * restrict py1, IplImage* img) {
+
+	unsigned char *pd1= (unsigned char*) img->imageData;
+	const unsigned char *py2 = py1 + W;
+	const unsigned char *pu = py1 + Y_SIZE;
+	const unsigned char *pv = pu + U_SIZE;
+	unsigned char *pd2 = pd1 + W*3;
+
+	int y, u, v;
+	int b, g, r;
+	int h, w;
+  for (h=0; h<H_2; ++h) {
+    for (w=0; w<W_2; ++w) {
+
+      u = *(pu++) - 128;
+      v = *(pv++) - 128;
+
+      b = (454*u) >> 8;
+      g = (183*v + 88*u) >> 8;
+      r = (359*v) >> 8;
+
+      y = *(py1++);
+
+      if (h == 0 && w == 0) {
+        fprintf(stderr, "(%d %d %d)\n", y, u+128, v+128);
+      }
+
+      *(pd1++) = sat(y + b);
+      *(pd1++) = sat(y - g);
+      *(pd1++) = sat(y + r);
+
+      y = *(py1++);
+      *(pd1++) = sat(y + b);
+      *(pd1++) = sat(y - g);
+      *(pd1++) = sat(y + r);
+
+      y = *(py2++);
+      *(pd2++) = sat(y + b);
+      *(pd2++) = sat(y - g);
+      *(pd2++) = sat(y + r);
+
+      y = *(py2++);
+      *(pd2++) = sat(y + b);
+      *(pd2++) = sat(y - g);
+      *(pd2++) = sat(y + r);
+    }
+    py1 = py2;
+    py2 += W;
+    pd1 = pd2;
+    pd2 += W*3;
+
+  }
+}
+
+
+void rgb2yuv(unsigned char r, unsigned char g, unsigned char b, unsigned char* Y1, unsigned char* Cb, unsigned char* Cr){
+    *Y1 = clamp((( ( 66 * r + 129 * g + 25 * b + 128) >> 8) + 16));
+    *Cb = clamp(( ( -38 * r - 74 * g + 112 * b + 128) >> 8) + 128);
+    *Cr = clamp(( ( 112 * r - 94 * g - 18 * b + 128) >> 8) + 128 );
+}
+
+int jpeg2yuv(unsigned char* tmpbuf, int buffersize, IplImage* img) {
+	struct jpeg_decompress_struct* jpeg_decompressor=newDecompressor(MAX_NET_WIDTH);
+	long rgbbuffersize;
+	unsigned char rgbbuffer[MAX_NET_WIDTH*MAX_NET_HEIGHT*3];
+	if(read_JPEG_buffer(jpeg_decompressor,
+				tmpbuf,
+				buffersize,
+				rgbbuffer,
+				rgbbuffersize,
+				NULL,
+				0) !=1){
+					fprintf(stderr,"\nerror while decoding jpeg files.\n");
+					
+					//if fatal error occurs,
+					if(isfatalerror()){
+						fprintf(stderr,"\nwarning: fatal error occur. reconstructing decompress process.\n");
+						//first delete old decompressor
+						deleteDecompressor(jpeg_decompressor);
+						//next create new decompressor
+						jpeg_decompressor=newDecompressor(MAX_NET_WIDTH);
+					}
+					//exit(-1);
+					return -1;
+			}
+	
+	//now convert from rgb to YUV420P
+
+	for(int h=0;h<H;h++){
+		for(int w=0;w<W;w++){
+			//int y,cb,cr;
+			unsigned char* rgbstart=rgbbuffer+(h*W+w)*3;
+
+      ((unsigned char*)(img->imageData + img->widthStep*h))[w*3+1] = *(rgbstart+2);
+      ((unsigned char*)(img->imageData + img->widthStep*h))[w*3+2] = *(rgbstart+0);
+      ((unsigned char*)(img->imageData + img->widthStep*h))[w*3] = *(rgbstart+1);
+
+		}
+	}
+	return 0;
+}
+
+
+/******************jpeg2yuv end*****************************/
+
+void translate_init() {
+	int i;	
+	FILE *fin = fopen(tfile, "r");
+
+	if (fin == NULL){
+		perror(tfile);
+		exit(-1);
+	}
+
+	for(i=0;i<8;i++){
+		if(fscanf(fin, "%f", vparam[0]+i) != 1) {
+			fprintf(stderr, "read uv2xy param error\n");
+			exit(-1);
+		}
+	}
+
+	for(i=0;i<8;i++){
+		if(fscanf(fin, "%f", vparam[1]+i) != 1) {
+			fprintf(stderr, "read uv2xy param error\n");
+			exit(-1);
+		}
+	}
+
+	fclose(fin);
+}
+
+void getxy(float u, float v, int *x, int *y, float param[]) {
+	float temp;
+
+	temp = param[6]*u + param[7]*v +1;
+	*x = (int)((param[0]*u + param[1]*v + param[2])/temp);
+	*y = (int)((param[3]*u + param[4]*v + param[5])/temp);
+}
+
+int hball[2], ball_x[2], ball_y[2];
+
+int catchball(struct reg_t *reg) {
+    return (reg->x1 >= 60 && reg->x2 >= 157 && reg->y1 > 70);
+}
+
+int left_right(int x, int y) {
+    return (x - y / BALL_NEAR_K - BALL_NEAR_X);
+}
+
+int find_ball(int i, struct reg_t *reg)
+{
+    hball[i] = 0;
+    if (i == 0) {
+        if (reg->y2 >= BOTTOM_LINE) {	// y2 reaches the bottom
+                ball_y[i] = LOC_Y_VERY_NEAR; /* ball very near */
+                int turn = left_right(reg->x1, reg->y1);
+                printf("%d\n", turn);
+                if (turn < -BALL_CENTER_OFFSET)
+                    ball_x[i] = LOC_LEFT;
+                else if (turn > BALL_CENTER_OFFSET)
+                    ball_x[i] = LOC_RIGHT;
+                else {
+                    ball_x[i] = 0;
+                    if (catchball(reg)) {
+                        ball_y[i] = LOC_CATCH_BALL;
+                    }
+                }
+        } else {
+                int r = (reg->y2 - reg->y1)/2;
+                int cx = (reg->x1 + reg->x2) / 2;
+                int rx = 0, ry = 0;				
+                if (reg->x1 <= 1)
+                        cx = reg->x2 - r;
+                else if (reg->x2 >= 159)
+                        cx = reg->x1 + r;
+                getxy(cx, reg->y2+4, &rx, &ry, vparam[0]);
+                if (cx < 0)
+                        ball_x[i] = LOC_LEFT;
+                else if (cx > 159)
+                        ball_x[i] = LOC_RIGHT;
+                else {					
+                        if (rx > 10)
+                                ball_x[i] = LOC_LEFT;
+                        else if (rx < -10)
+                                ball_x[i] = LOC_RIGHT;
+                        else
+                            ball_x[i] = 0;
+                }				
+                if (ry > DISTANCE_FAR) {
+                        ball_y[i] = LOC_Y_INVALID;
+                } else
+                        ball_y[i] = LOC_Y_NEAR;
+        }
+        hball[i] = 1;        
+    } else if (i == 1) {
+        hball[i] = 1;
+        getxy(reg->cx, reg->y2+4, &ball_x[i], &ball_y[i], vparam[1]);
+        if (ball_y[i] > DISTANCE_FAR) {
+                ball_y[i] = LOC_Y_FAR;
+                if (ball_x[i] < -TURN_OFFSET_FAR)
+                        ball_x[i] = LOC_RIGHT;
+                else if (ball_x[i] > TURN_OFFSET_FAR)
+                        ball_x[i] = LOC_LEFT;
+                else 
+                        ball_x[i] = 0;                    
+        }
+        if (reg->y2 >= BOTTOM_LINE) {                                
+                hball[i] = 0;             
+        }            
+    }
+    if (hball[i] != 0)
+        printf("%d:\t(%d,%d)\n", i, ball_x[i],ball_y[i]);    
+    return 1;
+}
+
+static inline unsigned int max(int a, int b) {
+  return (a>=b)?a:b;
+}
+static inline unsigned int min(int a, int b) {
+  return (a<=b)? a:b;
+}
+
+//***************Calculate TransMatrix Start****************
+
+void PrintMat(CvMat *A)
+{
+	int i, j;
+	for(i = 0; i < A->rows; i++)
+	{
+		putchar('\n');
+		switch(CV_MAT_DEPTH(A->type))
+		{
+		case CV_32F:
+		case CV_64F:
+			for(j = 0; j < A->cols; j++)
+			{
+				printf("%9.4f", (float)cvGetReal2D(A, i, j));
+			}
+			break;
+		case CV_8U:
+		case CV_16U:
+			for(j = 0; j < A->cols; j++)
+			{
+				printf("%6d", (int )cvGetReal2D(A, i, j));
+			}
+			break;
+		}
+	}
+	putchar('\n');
+	return;
+}
+
+
+void MakeMatViaRes(CvMat *MatA, CvMat *MatB, CvPoint *ImagPosition, CvPoint *RealPosition, int points)
+{
+	int i, j;
+	double points_u[MAX_POINTS];
+	double points_y[MAX_POINTS];
+	double points_x[MAX_POINTS];
+	double points_v[MAX_POINTS];
+	
+	for(i = 0;i< points; i++)
+	{
+		points_u[i] = (double)ImagPosition[i].x;
+		points_v[i] = (double)ImagPosition[i].y;
+		points_x[i] = (double)RealPosition[i].x;
+		points_y[i] = (double)RealPosition[i].y;
+	}
+	for(i = 0; i < points; i++)
+	{
+		cvmSet(MatA, i, 0, points_u[i]);
+		cvmSet(MatA, i, 1, points_v[i]);
+		cvmSet(MatA, i, 2, 1);
+		cvmSet(MatA, i, 6, - points_u[i] * points_x[i]);
+		cvmSet(MatA, i, 7, - points_v[i] * points_x[i]);
+
+		cvmSet(MatB, i, 0, points_x[i]);
+	}
+	for(i = points; i < 2 * points; i++)
+	{
+		cvmSet(MatA, i, 3, points_u[i - points]);
+		cvmSet(MatA, i, 4, points_v[i - points]);
+		cvmSet(MatA, i, 5, 1);
+		cvmSet(MatA, i, 6, - points_u[i - points] * points_y[i - points]);
+		cvmSet(MatA, i, 7, - points_v[i - points] * points_y[i - points]);
+
+		cvmSet(MatB, i, 0, points_y[i - points]);
+	}
+	return;
+}
+
+void CalTransMat(CvMat *TranMat, int points, CvPoint *ImagPosition, CvPoint *RealPosition)
+{
+	CvMat * MatA= cvCreateMat(2 * points, 8, CV_64FC1);
+	CvMat * MatB= cvCreateMat(2 * points, 1, CV_64FC1);
+	CvMat * MatInvA = cvCreateMat(8, 2 * points, CV_64FC1);
+	cvZero(MatA);
+	cvZero(MatB);
+	cvZero(MatInvA);
+
+	void PrintMat(CvMat*);
+
+	MakeMatViaRes(MatA, MatB, ImagPosition, RealPosition, points);
+
+	cvInvert(MatA, MatInvA, CV_SVD);
+	cvMatMul(MatInvA, MatB, TranMat);
+
+	return;
+}
+//***************Calculate TransMatrixEnd****************
+
+
+//*************IsThePointInOurSection?
+
+void GetExtent(const CvPoint* point_list, int Amn_Point, Rect_t *rc)
+{
+	int i;
+	if (Amn_Point > 0)
+	{
+		rc->Max_x = rc->Min_x = point_list[0].x;
+		rc->Max_y = rc->Min_y = point_list[0].y;
+	}
+	else
+	{
+		rc->Max_x = rc->Min_x = rc->Max_y = rc->Min_y = 0;
+	}
+	for(i = 1; i < Amn_Point; i++)
+	{
+		if (point_list[i].x < rc->Min_x)
+			rc->Min_x = point_list[i].x;
+		if (point_list[i].y < rc->Min_y)
+			rc->Min_y = point_list[i].y;
+		if (point_list[i].x > rc->Max_x)
+			rc->Max_x = point_list[i].x;
+		if (point_list[i].y > rc->Max_y)
+			rc->Max_y = point_list[i].y;
+	}
+	return;
+}
+static int IsSame(const CvPoint* line_start, const CvPoint* line_end, const CvPoint* point_p, const CvPoint* point_q)
+{
+	int dx = line_end->x - line_start->x;
+	int dy = line_end->y - line_start->y;
+	int dxp = point_p->x - line_start->x;
+	int dyp = point_p->y - line_start->y;
+	int dxq = point_q->x - line_end->x;
+	int dyq = point_q->y - line_end->y;
+	return ((dx * dyp - dy * dxp) * (dx * dyq - dy * dxq) > 0 ? 1 : 0);
+}
+
+static int IsCross(const CvPoint* line1_start, const CvPoint* line1_end, const CvPoint* line2_start, const CvPoint* line2_end)
+{
+	return (
+			(
+				!IsSame(line1_start, line1_end, line2_start, line2_end)
+				&& !IsSame(line2_start, line2_end, line1_start, line1_end)
+			) ? 1 : 0
+		   );
+}
+
+int IsInTheSection(const CvPoint* bon_list, int Amn_point, const CvPoint* ThePoint)
+{
+	int i, j, k1, k2;
+	int Counter = 0;		
+	Rect_t ExtRectangle;	
+	CvPoint OutsidePoint;
+
+	if (Amn_point < 3)
+		return 0;
+	GetExtent(bon_list, Amn_point, &ExtRectangle);
+	if (ThePoint->x < ExtRectangle.Min_x || ThePoint->x > ExtRectangle.Max_x || ThePoint->y < ExtRectangle.Min_y || ThePoint->y > ExtRectangle.Max_y)
+		return 0;
+
+	OutsidePoint.x = ExtRectangle.Max_x + 1;
+	OutsidePoint.y = ThePoint->y;
+
+	for(i = 0; i < Amn_point; i++)
+	{
+		j = (i + 1) % Amn_point;
+		if (IsCross(bon_list + i, bon_list + j, ThePoint, &OutsidePoint))
+		{
+			Counter++;
+		}
+		else if (bon_list[i].y == ThePoint->y)
+		{
+			k1 = (Amn_point + i - 1) % Amn_point;
+			while (k1 != i && bon_list[k1].y == ThePoint->y)
+				k1 = (Amn_point + k1 - 1) % Amn_point;
+			k2 = (i + 1) % Amn_point;
+			while (k2 != i && bon_list[k2].y == ThePoint->y)
+				k1 = (k2 + 1) % Amn_point;
+			if(k1 != k2 && !IsSame(ThePoint, &OutsidePoint, bon_list + k1, bon_list + k2))
+				Counter++;
+			if(k2 <= i)
+				break;
+			i = k2;
+		}
+	}
+	return Counter % 2;
+}
+
+
+void SignACircle(IplImage* Image, char * window, const CvPoint Aid)
+{
+	memcpy(ImageDisplay->imageData, Image->imageData, W * H * 3);
+	cvCircle(ImageDisplay, Aid, 3, cvScalar(0,255,0));
+	cvShowImage(window, ImageDisplay);
+	cvWaitKey(500);
+	return;
+}
+
+void GetRealPos(int Amount,const CvPoint *ImagPosition, CvPoint *RealPosition,const int InputMode)
+{
+	int TempM = 0, TempN = 0;
+	switch(InputMode)
+	{
+		case 0:
+			printf("\nInput Mode: 1 Real Position (Default)\n");
+			break;
+		case 1:
+			printf("\nInput Mode: 2 Net Position\n");
+			break;
+		default:
+			printf("\nInput Mode ERROR!!! Exit\n");
+			exit(-1);
+	}
+
+	printf("The Points Amount in Area: %d\n", Amount);
+	for (int i = 0; i < Amount; i++)
+	{
+
+		printf("ImagePosition[%d]: (%d, %d) is in\n", i, ImagPosition[i].x, ImagPosition[i].y);
+				
+		SignACircle(Image1, "Left", ImagPosition[i]);
+
+		printf("Input RealPosition[%d](x  y):", i);
+		scanf("%d%d", &TempM, &TempN);
+		switch (InputMode)
+		{
+			case 0:
+				RealPosition[i] = cvPoint(TempM, TempN);
+				break;
+			case 1:
+				RealPosition[i] = cvPoint(TempM * NET_W + NET_X_LOC, TempN * NET_H + NET_Y_LOC);
+				break;
+			default:
+				printf("MODE ERROR!!! EXIT!\n");
+				exit(-1);
+		}
+	}	
+	return;
+}
+//************************END*************************
+
+
+void onMouseClicked( int event, int x, int y, int flags, void* param ) {
+	static int rClicked = 0;
+	CvPoint *bndStart = 0;
+	CvPoint *bndEnd = 0;
+	IplImage *Image = 0;
+	char * window = 0;
+
+	//MyValue	
+	CvPoint bon_list[4], Testpoint[45], ImagPosition[20], RealPosition[20], NetPosition[20];
+	int CountIn = 0;
+	//
+
+	if (*((int *)param) == idLeft) {
+		bndStart = &bndLeftStart;
+		bndEnd = &bndLeftEnd;
+		Image = Image1;
+		window = "Left";
+	} else {
+		bndStart = &bndRightStart;
+		bndEnd = &bndRightEnd;
+		Image = Image2;
+		window = "Right";
+	}
+	switch( event )
+	{
+		case CV_EVENT_LBUTTONDOWN:
+			if (rClicked){
+				bndEnd->x = max(x, bndStart->x);
+				bndEnd->y = max(y, bndStart->y);
+			} else {
+				bndStart->x = min(x, bndEnd->x);
+				bndStart->y = min(y, bndEnd->y);
+			}
+			rClicked = 1 - rClicked;
+memcpy(ImageDisplay->imageData, Image->imageData, W * H * 3);
+	for (int i=0;i<findedcount;i++) 
+		cvCircle(ImageDisplay, cvPoint(finded[i].x, finded[i].y), 2, cvScalar(255,0,0));
+	cvRectangle(ImageDisplay, *bndStart, *bndEnd, cvScalar(0,0,255));
+
+        
+	//fprintf(stderr, "\r%4d  %4d", ++i1, i2);
+	cvShowImage(window, ImageDisplay);
+			break;
+		case CV_EVENT_RBUTTONDOWN:
+		        //MYDUTY
+			bon_list[0] = cvPoint(bndStart->x, bndStart->y);
+			bon_list[1] = cvPoint(bndStart->x, bndEnd->y);
+			bon_list[2] = cvPoint(bndEnd->x, bndEnd->y);
+			bon_list[3] = cvPoint(bndEnd->x, bndStart->y);
+			
+			printf("bonlist[0]:%d %d\n", bon_list[0].x, bon_list[0].y);
+			printf("find[1]:%d %d\n", (int)finded[1].x, (int)finded[1].y);
+			
+			//Invert (float) to (int)
+			for (int i = 0; i < findedcount; i++)
+			{
+				Testpoint[i] = cvPoint( (int)finded[i].x, (int)finded[i].y);
+				printf("The (int)Point[%d]: (%d, %d)\n", i, Testpoint[i].x, Testpoint[i].y);	
+			}
+
+			for (int i = 0; i < findedcount; i++)
+			{
+				if (IsInTheSection(bon_list, 4, &Testpoint[i]))
+				{
+					ImagPosition[CountIn] = cvPoint(Testpoint[i].x, Testpoint[i].y);
+					CountIn++;
+				}
+			}
+
+			GetRealPos(CountIn, ImagPosition, RealPosition, DataInputMode);
+			//Jun.4.08 Get The Real Position
+
+			//...
+			printf("Mission Accomplished:\n");
+			for (int i = 0; i < CountIn; i++)
+			{
+				printf("Imag[%3d]: (%4d, %4d)     Real[%3d]: (%4d, %4d)\n", i,ImagPosition[i].x, ImagPosition[i].y, i, RealPosition[i].x, RealPosition[i].y);
+			}
+			
+
+
+			CalTransMat(Tran_Mat, CountIn, ImagPosition, RealPosition);
+			printf("The Translated Matrix:");
+			PrintMat(Tran_Mat);			
+
+			bndStart->x = 0;
+			bndStart->y = 0;
+			bndEnd->x = W;
+			bndEnd->y = H;
+			rClicked = 0;
+			break;
+		default:
+			;
+	}	
+}
+
+void window() {
+	//   IplImage* 
+	pthread_t tid1;
+	pthread_t tid2;
+	dec_init();
+	Image1 = cvCreateImage(cvSize(W,H), IPL_DEPTH_8U, 3);
+	Image2 = cvCreateImage(cvSize(W,H), IPL_DEPTH_8U, 3);
+	ImageDisplay = cvCreateImage(cvSize(W,H), IPL_DEPTH_8U, 3);
+	grey1 = cvCreateImage(cvSize(W,H), IPL_DEPTH_8U, 1);
+	grey2 = cvCreateImage(cvSize(W,H), IPL_DEPTH_8U, 1);
+	cvSetMouseCallback("Left", onMouseClicked, &idLeft);
+	cvSetMouseCallback("Right", onMouseClicked, &idRight);
+	get_data();
+	//pthread_create(&tid1,NULL,get_data1, &idLeft);
+	//pthread_create(&tid2,NULL,get_data2, &idRight);
+}
+
+void paintEvent() {
+/*
+	QPainter p(this);
+	p.drawImage(0, 0, *pRGB1);	
+	p.drawImage(W, 0, *pRGB2);
+        p.setPen(QColor(255, 255, 255));
+        //if (l_x2 > 0)
+        //    p.drawRect(l_x1 << 1, l_y1 << 1, (l_x2 - l_x1) << 1,
+	//		(l_y2 - l_y1 + 1) << 1 );
+        if (l_r.x > 0)
+            p.drawLine(l_l.x, l_l.y, l_r.x, l_r.y);
+        //if (r_x2 > 0)
+        //    p.drawRect((r_x1 << 1) + W, r_y1 << 1, (r_x2 - r_x1) << 1,
+	//		(r_y2 - r_y1 + 1) << 1 );
+        if (r_r.x > 0)
+            p.drawLine(W + r_l.x, r_l.y, W + r_r.x, r_r.y); 
+        p.setPen(QColor(255, 0, 255));
+        for (int i=0;i<line_count;i++)
+           p.drawLine(left[i].x,left[i].y,right[i].x,right[i].y);
+        p.setPen(QColor(255, 255, 255));
+        if (l_ball_radius != -1)
+            p.drawEllipse(l_center.x-l_ball_radius, l_center.y-l_ball_radius, 2*l_ball_radius, 2*l_ball_radius);
+        if (r_ball_radius != -1)
+            p.drawEllipse( W + r_center.x-r_ball_radius, r_center.y-r_ball_radius, 2*r_ball_radius, 2*r_ball_radius);
+*/
+}
+
+void getEdgeDistance(struct spot left, struct spot right, int * dis, double * angle) {
+    double lx = left.x + 0.375*(right.x-left.x);
+    double ly = left.y + 0.375*(right.y-left.y);
+    double rx = left.x + 0.625*(right.x-left.x);
+    double ry = left.y + 0.625*(right.y-left.y);
+    int rlx, rly, rrx, rry;
+    getxy(lx/2, ly/2, &rlx, &rly, vparam[0]);
+    getxy(rx/2, ry/2, &rrx, &rry, vparam[0]);    
+    double k = ((double)(rry-rly))/(rrx-rlx);
+    *dis = (int)(rry - k*rrx);
+    *angle = atan(k);
+    printf("y=%fx+%d;(%d,%d);(%d %d)\n", k, *dis, rlx, rly, rrx, rry);   
+    printf("DIS: %d; AGL: %f\n", *dis, *angle);   
+}
+
+void findPoints(IplImage* Image, CvPoint *bndStart, CvPoint *bndEnd, char * window) {
+  //cvCvtColor(Image1, grey1, CV_RGB2GRAY);
+  cvFindChessboardCorners(Image, cvSize(5,9), finded, &findedcount);
+  
+  memcpy(ImageDisplay->imageData, Image->imageData, W * H * 3);
+  memcpy(ImageDisplay->imageData, Image->imageData, W * H * 3);
+  for (int i=0;i<findedcount;i++) 
+    cvCircle(ImageDisplay, cvPoint(finded[i].x, finded[i].y), 2, cvScalar(255,0,0));
+  cvRectangle(ImageDisplay, *bndStart, *bndEnd, cvScalar(0,0,255));
+
+  for (int i=0; i<findedcount; i++)
+    printf("|%d %d| ", finded[i].x, finded[i].y);
+  printf("\n");
+  //fprintf(stderr, "\r%4d  %4d", ++i1, i2);
+  cvShowImage(window, ImageDisplay);
+}
+void receive(unsigned char *raw_buf, struct net *ns, IplImage *Image, CvPoint *bndStart, CvPoint *bndEnd, char* window) {
+  int size = 0, outsize = 0;
+  if ((size = net_recv(raw_buf, MAX_MJPEG_SIZE, ns)) <= 0) {
+    fprintf(stderr, "net_recv error\n");
+    exit(-1);
+  }
+
+  jpeg2yuv(raw_buf, size, Image);
+  findPoints(Image, bndStart, bndEnd, window);
+
+}
+
+void get_data() {
+
+  yuv2Ipl(src, Image1);
+  findPoints(Image1, &bndLeftStart, &bndLeftEnd, "Left");
+
+  return;                          
+}
+
+void* get_data1(void *arg) {
+  for (;;) {
+    receive(raw_buf1, &ns1, Image1, &bndLeftStart, &bndLeftEnd, "Left");
+    usleep(500);
+  }
+	net_close(&ns1);
+	return NULL;                          
+}
+
+void* get_data2(void *arg) {
+  for (;;) {
+    receive(raw_buf2, &ns2, Image2, &bndRightStart, &bndRightEnd, "Right");
+    usleep(500);
+  }
+	net_close(&ns2);
+	return NULL;                          
+}
+
+void mousePressEvent() {
+/*
+	++n;
+	sprintf(filename, "%d_1.yuv", n);
+	msave(filename, yuv_buf1, MAX_MJPEG_SIZE);
+	sprintf(filename, "%d_2.yuv", n);
+	msave(filename, yuv_buf2, MAX_MJPEG_SIZE);
+	sprintf(filename, "%d.yuv", n);
+	setCaption(filename);
+*/
+}
+
+int main(int argc, char *argv[]) {
+	cvNamedWindow("Left");
+	//cvNamedWindow("Right");
+	src = process(argc, argv);
+	window();
+	cvWaitKey(0);
+	//cvDestroyWindow("Right");
+	cvDestroyWindow("Left");
+  cvReleaseImage(&grey1);
+  cvReleaseImage(&grey2);
+  cvReleaseImage(&Image2);
+  cvReleaseImage(&Image1);
+  cvReleaseImage(&ImageDisplay);
+	return 0;
+}

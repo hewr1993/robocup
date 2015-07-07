@@ -1,0 +1,267 @@
+/*
+ *  2004 - 2007 by fzf
+ *
+ *   This program is free software; you can redistribute it and/or modify
+ *   it under the terms of the GNU General Public License as published by
+ *   the Free Software Foundation; either version 2 of the License, or
+ *   (at your option) any later version.
+ *
+ *   This program is distributed in the hope that it will be useful,
+ *   but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *   GNU General Public License for more details.
+ *
+ *   You should have received a copy of the GNU General Public License
+ *   along with this program; if not, write to the Free Software
+ *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
+ *
+ */
+
+#include <qpainter.h>
+#include <qimage.h>
+#include <math.h>
+#include "window.h"
+
+#include "global.h"
+#include "cmv.h"
+#include "cvt.h"
+
+extern int use_cmv;
+extern struct cmv_data data;
+extern int bb;
+extern unsigned char src[];
+extern char *filename;
+
+char s[24];
+int *pc;
+int ch = 0;
+int ci = 0;
+int point_x = -1, point_y = -1;
+const char *tfile = "translate.conf";
+float vparam[2][8];
+
+struct spot left[MAX_LINES];
+struct spot right[MAX_LINES];
+
+static inline void print_th() {
+	int *p = data.th[ci];
+	fprintf(stderr, "\r%2d:  ", ci+1);
+	switch (ch) {
+		case 0:
+			fprintf(stderr, "Y %3d %3d  u %3d %3d  v %3d %3d", p[0], p[1], p[2], p[3], p[4], p[5]);
+			break;
+		case 1:
+			fprintf(stderr, "y %3d %3d  U %3d %3d  v %3d %3d", p[0], p[1], p[2], p[3], p[4], p[5]);
+			break;
+		case 2:
+			fprintf(stderr, "y %3d %3d  u %3d %3d  V %3d %3d", p[0], p[1], p[2], p[3], p[4], p[5]);
+			break;
+		default:
+			exit(-1);
+	}
+}
+
+void translate_init() {
+	int i;	
+	FILE *fin = fopen(tfile, "r");
+
+	if (fin == NULL){
+		perror(tfile);
+		exit(-1);
+	}
+
+	for(i=0;i<8;i++){
+		if(fscanf(fin, "%f", vparam[0]+i) != 1) {
+			fprintf(stderr, "read uv2xy param error\n");
+			exit(-1);
+		}
+	}
+
+	for(i=0;i<8;i++){
+		if(fscanf(fin, "%f", vparam[1]+i) != 1) {
+			fprintf(stderr, "read uv2xy param error\n");
+			exit(-1);
+		}
+	}
+
+	fclose(fin);
+}
+
+void getxy(float u, float v, int *x, int *y, float param[]) {
+	float temp;
+
+	temp = param[6]*u + param[7]*v +1;
+	*x = (param[0]*u + param[1]*v + param[2])/temp;
+	*y = (param[3]*u + param[4]*v + param[5])/temp;
+}
+
+window::window() {
+	setMinimumSize(W, H);
+	setMaximumSize(W, H);
+	setBackgroundMode(Qt::NoBackground);
+	setCaption(filename);
+	translate_init();
+	
+        memset(left, 0, sizeof(left));
+        memset(right, 0, sizeof(right));
+        
+	pRGB = new QImage(W, H, 32, 0);
+	
+	if (use_cmv) {
+		for (; ci<data.color_n; ++ci) {
+			if (data.remap[ci]) break;
+		}
+		cvtm(src, pRGB->bits(), data.map, data.remap[ci]);
+		pc = data.th[ci];
+		print_th();
+	}
+	else cvt(src, pRGB->bits());
+}
+
+window::~window() {
+	printf("\n");
+}
+
+void window::paintEvent(QPaintEvent *) {
+	QPainter p(this);
+	p.drawImage(0, 0, *pRGB);
+
+	if (point_x >=0 && point_y >=0) {
+		if (use_cmv) p.setPen(QColor(data.rgb[0][2], data.rgb[0][1], data.rgb[0][0]));
+		else p.setPen(QColor(0, 255, 255));
+		p.drawRect(point_x-1, point_y-1, 3, 3);
+	}
+        
+	p.setPen(QColor(255, 0, 0));
+        for (int i=0;i<MAX_LINES;i++) {
+            if (right[i].x >= 0)                 
+                p.drawLine(left[i].x,left[i].y,right[i].x,right[i].y);           
+        }
+	
+	if (use_cmv == 1 && bb && ci >= 0) {
+		int t = data.remap[ci]-1;
+		if (data.clist[t] <= 0) return;
+
+		p.setPen(QColor(0, 255, 0));
+
+		struct reg_t *reg = data.cmax[t];
+		p.drawRect(reg->x1 << 1, reg->y1 << 1,
+			(reg->x2 - reg->x1) << 1,
+			(reg->y2 - reg->y1 + 1) << 1 );
+	}
+}
+
+void window::mousePressEvent(QMouseEvent *e) {
+	int x = e->x();
+	int y = e->y();
+	if (x < 0 || x >= W || y < 0 || y >= H) {
+		return;
+	}
+
+	int t;
+	int rx1 = 0, ry1 = 0;
+	int rx2 = 0, ry2 = 0;
+	switch (e->button()) {
+		case RightButton:
+			point_x = x;
+			point_y = y;			
+			getxy(x/2,y/2,&rx1,&ry1,vparam[0]);
+			getxy(x/2,y/2,&rx2,&ry2,vparam[1]);
+			sprintf(s, "%d,%d(%d %d)(%d %d): %d %d %d", x, y, rx1, ry1, rx2, ry2,
+				src[y * W + x],
+				src[Y_SIZE + (y>>1) * W_2 + (x>>1) ],
+				src[Y_SIZE + U_SIZE + (y>>1) * W_2 + (x>>1)] );
+			setCaption(s);
+			break;
+		case LeftButton:
+			if (!use_cmv || (t = data.map[(y>>1) * (W_2+1) + (x>>1)]-1) < 0 || t == ci) return;
+			ci = t;
+			pc = data.th[ci] + (ch<<1);
+			print_th();
+			cvtm(src, pRGB->bits(), data.map, data.remap[ci]);
+			break;
+		default:
+			return;
+	}
+	update();
+}
+
+void window::keyPressEvent(QKeyEvent *e) {
+	int t = e->ascii();
+
+	if (t == 'r' && point_x >=0 && point_y >= 0) {
+		point_x = point_y = -1;
+		setCaption(filename);
+		update();
+		return;
+	}
+
+	if (!use_cmv || ci < 0) return;
+
+	switch (t) {
+	case 'y': //choose Y component
+		if (ch == 0) return;
+		ch = 0;
+		pc = data.th[ci];
+		print_th();
+		return;
+	case 'u': //choose U component
+		if (ch == 1) return;
+		ch = 1;
+		pc = data.th[ci] + 2;
+		print_th();
+		return;
+	case 'v': //choose V component
+		if (ch == 2) return;
+		ch = 2;
+		pc = data.th[ci] + 4;
+		print_th();
+		return;
+	case '1': //reduce max boundary
+		if (pc[0] == 0) return;
+		--pc[0];
+		cmv_reinit(&data, ch, ci, pc[0], 1);
+		break;
+	case '2': //increase max boundary
+		if (pc[0] == pc[1]) return;
+		cmv_reinit(&data, ch, ci, pc[0], 0);
+		++pc[0];
+		break;
+	case '3': //reduce min boundary
+		if (pc[1] == pc[0]) return;
+		cmv_reinit(&data, ch, ci, pc[1], 0);
+		--pc[1];
+		break;
+	case '4': //increase max boundary
+		if (pc[1] == 255) return;
+		++pc[1];
+		cmv_reinit(&data, ch, ci, pc[1], 1);
+		break;
+	default:
+		return;
+	}
+
+	print_th();
+	cmv_process(&data, src);
+        double angle[MAX_LINES];
+        int radius[MAX_LINES];
+        int count;
+        edge_detection(&data, angle, radius, &count);     
+        for (int i=0;i<MAX_LINES;i++) {
+            if (i>=count) {
+                right[i].x = 0;
+            } else {
+                printf("%f %d\n", angle[i], radius[i]);    
+                left[i].x = 0;
+                left[i].y = 2*(H_2 - 1 - (int)(radius[i] / sin(angle[i])));
+                right[i].x = 2*(W_2 - 1);
+                right[i].y = 2*(H_2 - 1 - (int)((radius[i] - (W_2 - 1)*cos(angle[i])) / sin(angle[i])));
+            }                
+        }
+        
+//	goal_detection(&data, src, &left, &right, &isleft, &isright);
+//	fprintf(stderr, " left (%d,%d)\n right (%d %d)\n left %d right %d\n", left.x, left.y, right.x, right.y, isleft, isright);
+	cvtm(src, pRGB->bits(), data.map, data.remap[ci]);
+	update();
+}
+

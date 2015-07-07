@@ -1,0 +1,586 @@
+/*
+ *  2004 - 2007 by fzf
+ *
+ *   This program is free software; you can redistribute it and/or modify
+ *   it under the terms of the GNU General Public License as published by
+ *   the Free Software Foundation; either version 2 of the License, or
+ *   (at your option) any later version.
+ *
+ *   This program is distributed in the hope that it will be useful,
+ *   but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *   GNU General Public License for more details.
+ *
+ *   You should have received a copy of the GNU General Public License
+ *   along with this program; if not, write to the Free Software
+ *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
+ *
+ */
+
+#include <qpainter.h>
+#include <qimage.h>
+#include <math.h>
+#include <string.h>
+#include "window.h"
+
+#include "global.h"
+#include "cmv.h"
+#include "cvt.h"
+
+extern int use_cmv;
+extern int use_bp;
+extern int get_training_sample;
+extern int get_calib_sample;
+extern int sample_color_id;
+extern int reset_cmv;
+extern struct cmv_data data;
+extern int bb;
+extern unsigned char src[];
+extern char *filename;
+extern char *cfilename;
+
+char s[24];
+int *pc;
+int ch = 0;
+int ci = 0;
+int point_x = -1, point_y = -1;
+const char *tfile = "translate.conf";
+float vparam[2][8];
+int tempth[6];
+int backvalid = 0;
+
+const char *calib_file = "./thrdadpt/samples.conf";
+const char *color_file[] = {"red.conf", "blue.conf", "yellow.conf", "green.conf", "white.conf", "other.conf"};
+
+//added by hjw
+int double_click = 0;
+int x_begin = 0, y_begin = 0;
+
+struct spot d_left, d_right;
+struct spot left[MAX_LINES];
+struct spot right[MAX_LINES];
+struct spot center;
+int ball_radius;
+
+FILE *fin_bpcolor;
+
+static inline void print_th() {
+	int *p = data.th[ci];
+	fprintf(stderr, "\r%2d:  ", ci+1);
+	switch (ch) {
+		case 0:
+			fprintf(stderr, "Y %3d %3d  u %3d %3d  v %3d %3d", p[0], p[1], p[2], p[3], p[4], p[5]);
+			break;
+		case 1:
+			fprintf(stderr, "y %3d %3d  U %3d %3d  v %3d %3d", p[0], p[1], p[2], p[3], p[4], p[5]);
+			break;
+		case 2:
+			fprintf(stderr, "y %3d %3d  u %3d %3d  V %3d %3d", p[0], p[1], p[2], p[3], p[4], p[5]);
+			break;
+		default:
+			exit(-1);
+	}
+}
+
+void translate_init() {
+	int i;	
+	FILE *fin = fopen(tfile, "r");
+
+	if (fin == NULL){
+		perror(tfile);
+		exit(-1);
+	}
+
+	for(i=0;i<8;i++){
+		if(fscanf(fin, "%f", vparam[0]+i) != 1) {
+			fprintf(stderr, "read uv2xy param error\n");
+			exit(-1);
+		}
+	}
+
+	for(i=0;i<8;i++){
+		if(fscanf(fin, "%f", vparam[1]+i) != 1) {
+			fprintf(stderr, "read uv2xy param error\n");
+			exit(-1);
+		}
+	}
+
+	fclose(fin);
+	
+	if(use_bp == 1 || get_training_sample == 1) {
+		fin_bpcolor = fopen(color_file[sample_color_id], "w");
+	}
+	if(get_calib_sample == 1) {
+		fin_bpcolor = fopen(calib_file, "w");
+	}
+}
+
+void getxy(float u, float v, int *x, int *y, float param[]) {
+	float temp;
+
+	temp = param[6]*u + param[7]*v +1;
+	*x = (param[0]*u + param[1]*v + param[2])/temp;
+	*y = (param[3]*u + param[4]*v + param[5])/temp;
+}
+
+window::window() {
+	setMinimumSize(W, H);
+	setMaximumSize(W, H);
+	setBackgroundMode(Qt::NoBackground);
+	setCaption(filename);
+	translate_init();
+	
+        memset(left, 0, sizeof(left));
+        memset(right, 0, sizeof(right));
+        
+	pRGB = new QImage(W, H, 32, 0);
+	
+	if (use_cmv) {
+		for (; ci<data.color_n; ++ci) {
+			if (data.remap[ci]) break;
+		}
+                cvtc(src, pRGB->bits(), data.map, data.rgb);
+		//cvtm(src, pRGB->bits(), data.map, data.remap[ci]);
+		pc = data.th[ci];
+		print_th();
+	}
+	else cvt(src, pRGB->bits());
+}
+
+window::~window() {
+	printf("\n");
+}
+
+void window::paintEvent(QPaintEvent *) {
+	QPainter p(this);
+	p.drawImage(0, 0, *pRGB);
+
+	if (point_x >=0 && point_y >=0) {
+		if (use_cmv) p.setPen(QColor(data.rgb[0][2], data.rgb[0][1], data.rgb[0][0]));
+		else p.setPen(QColor(0, 255, 255));
+		p.drawRect(point_x-1, point_y-1, 3, 3);
+	}
+        
+	p.setPen(QColor(0, 0, 0));
+        for (int i=0;i<MAX_LINES;i++) {
+            if (right[i].x >= 0)                 
+                p.drawLine(left[i].x,left[i].y,right[i].x,right[i].y);           
+        }
+        p.setPen(QColor(255, 255, 255));
+        if (d_right.x > 0)
+            p.drawLine(d_left.x,d_right.y,d_right.x,d_right.y); 
+        p.setPen(QColor(255, 255, 0));
+        if (ball_radius != -1)
+            p.drawEllipse(center.x-ball_radius, center.y-ball_radius, 2*ball_radius, 2*ball_radius);
+	
+	if (use_cmv == 1 && bb && ci >= 0) {
+		int t = data.remap[ci]-1;
+		if (data.clist[t] <= 0) return;
+
+		p.setPen(QColor(0, 255, 0));
+
+		struct reg_t *reg = data.cmax[t];
+		p.drawRect(reg->x1 << 1, reg->y1 << 1,
+			(reg->x2 - reg->x1) << 1,
+			(reg->y2 - reg->y1 + 1) << 1 );
+	}
+}
+
+void window::mousePressEvent(QMouseEvent *e) {
+	int x = e->x();
+	int y = e->y();
+	if (x < 0 || x >= W || y < 0 || y >= H) {
+		return;
+	}
+
+	int t;
+	int rx1 = 0, ry1 = 0;
+	int rx2 = 0, ry2 = 0;
+	t = data.map[(y>>1) * (W_2+1) + (x>>1)]-1;
+	
+	
+	switch (e->button()) {
+		case RightButton:
+			if(reset_cmv == 1) {
+
+				if(t != ci) return;
+				int yuv[3] = {src[y * W + x] , src[Y_SIZE + (y>>1) * W_2 + (x>>1) ],
+									src[Y_SIZE + U_SIZE + (y>>1) * W_2 + (x>>1)]};
+				for(int i = 0 ; i < 3 ; i ++){
+					pc = data.th[ci] + i*2;
+					tempth[2*i] = pc[0];
+					tempth[2*i+1] = pc[1];
+				}
+				pc = data.th[ci] + (ch<<1);
+				
+				if(yuv[ch] > (pc[0] + pc[1])/2){
+					while(yuv[ch] <= pc[1]){					
+						cmv_reinit(&data, ch, ci, pc[1], 0);
+						pc[1] --;
+					}
+
+				}else{
+					while(yuv[ch] >= pc[0]){					
+						cmv_reinit(&data, ch, ci, pc[0], 0);
+						pc[0] ++;
+					}
+				}
+				print_th();
+				cvtc(src, pRGB->bits(), data.map, data.rgb);
+				
+				backvalid = 1;
+				
+				cmv_process(&data, src);
+        		double angle[MAX_LINES];
+        		int radius[MAX_LINES];
+        		int count;
+
+				int isleft = 0;
+				int isright = 0;
+				goal_detection(&data, src, &d_left, &d_right, &isleft, &isright);
+
+				cvtc(src, pRGB->bits(), data.map, data.rgb);
+
+				
+				update();
+					
+				return;
+			}
+			
+			point_x = x;
+			point_y = y;			
+			getxy(x/2,y/2,&rx1,&ry1,vparam[0]);
+			getxy(x/2,y/2,&rx2,&ry2,vparam[1]);
+			
+			if(get_calib_sample == 1) {
+				double_click = 1 - double_click;
+				if(double_click == 1) {
+					x_begin = x;
+					y_begin = y;
+				}
+				else {
+					int xx, yy;
+					for(xx=x_begin; xx<=x; xx++) {
+						for(yy=y_begin; yy<=y; yy++) {
+							int YY = src[yy * W + xx];
+							int UU = src[Y_SIZE + (yy>>1) * W_2 + (xx>>1) ];
+							int VV = src[Y_SIZE + U_SIZE + (yy>>1) * W_2 + (xx>>1)];
+							fprintf(fin_bpcolor, "%d %d %d\n",YY,UU,VV);
+						}
+					}
+				}
+				update();
+				return ;
+			}
+			
+			
+			
+			sprintf(s, "%d,%d(%d %d)(%d %d): %d %d %d", x, y, rx1, ry1, rx2, ry2,
+				src[y * W + x],
+				src[Y_SIZE + (y>>1) * W_2 + (x>>1) ],
+				src[Y_SIZE + U_SIZE + (y>>1) * W_2 + (x>>1)] );
+			
+			
+			if(use_bp == 1) {
+				fprintf(fin_bpcolor, "%d %d %d\n",
+					src[y * W + x],
+					src[Y_SIZE + (y>>1) * W_2 + (x>>1) ],
+					src[Y_SIZE + U_SIZE + (y>>1) * W_2 + (x>>1)] );
+			}
+			
+			if(get_training_sample == 1 || get_calib_sample == 1) {
+				double_click = 1 - double_click;
+				if(double_click == 1) {
+					x_begin = x;
+					y_begin = y;
+				}
+				else {
+					int xx, yy;
+					for(xx=x_begin; xx<=x; xx++) {
+						for(yy=y_begin; yy<=y; yy++) {
+							int YY = src[yy * W + xx];
+							int UU = src[Y_SIZE + (yy>>1) * W_2 + (xx>>1) ];
+							int VV = src[Y_SIZE + U_SIZE + (yy>>1) * W_2 + (xx>>1)];
+							fprintf(fin_bpcolor, "%d %d %d\n",YY,UU,VV);
+						}
+					}
+				}
+			}
+			
+			setCaption(s);
+			
+			break;
+		case LeftButton:
+			if(use_bp == 1 || get_training_sample == 1 ) {
+				if(double_click >= 1) return;
+				fclose(fin_bpcolor);
+				printf("Saved.\n");
+				exit(0);
+				break;
+			}
+			if(get_calib_sample == 1){
+				if(double_click >= 1) return;
+				fclose(fin_bpcolor);
+				printf("Saved.\n");
+				point_x = -1;
+				point_y = -1;
+				get_calib_sample = 0;
+				reset_cmv = 1;
+				use_cmv = 1;
+				cfilename = "./thrdadpt/thrd.txt";
+				
+				int id = vfork();
+				if(id == 0){
+					chdir("./thrdadpt");
+					execl("/usr/bin/octave","octave", "./thrdadpt_test.m",NULL);
+				}
+				FILE* in = fopen("./thrdadpt/test_finish.txt","r");
+				while(in==NULL)
+					in = fopen("./thrdadpt/test_finish.txt","r");
+				fclose(in);
+				remove("./thrdadpt/test_finish.txt");
+				
+				cmv_init(&data, cfilename);
+				printf("using color file %s\n", cfilename);
+				cmv_process(&data, src);
+
+				print_th();
+				cvtc(src, pRGB->bits(), data.map, data.rgb);
+				/*
+        		double angle[MAX_LINES];
+        		int radius[MAX_LINES];
+        		int count;
+        			
+        		edge_detection(&data, angle, radius, &count);     
+        		for (int i=0;i<MAX_LINES;i++) {
+            	if (i>=count) {
+               	right[i].x = 0;
+            	} else {
+               	printf("%f %d\n", angle[i], radius[i]);    
+               	left[i].x = 0;
+               	left[i].y = 2*(H_2 - 1 - (int)(radius[i] / sin(angle[i])));
+               	right[i].x = 2*(W_2 - 1);
+               	right[i].y = 2*(H_2 - 1 - (int)((radius[i] - (W_2 - 1)*cos(angle[i])) / sin(angle[i])));
+					} 
+				}
+				*/
+				pc = data.th[ci];
+
+				int isleft = 0;
+				int isright = 0;
+				goal_detection(&data, src, &d_left, &d_right, &isleft, &isright);
+
+				cvtc(src, pRGB->bits(), data.map, data.rgb);
+				update();
+				return;
+			}
+			if(reset_cmv == 1){
+				if(t == ci) return;
+				int yuv[3] = {src[y * W + x] , src[Y_SIZE + (y>>1) * W_2 + (x>>1) ],
+									src[Y_SIZE + U_SIZE + (y>>1) * W_2 + (x>>1)]};
+				
+				for(int i = 0 ; i < 3 ; i ++){
+					pc = data.th[ci] + i*2;
+					tempth[2*i] = pc[0];
+					tempth[2*i+1] = pc[1];
+					while(yuv[i] < pc[0]){
+						--pc[0];
+						cmv_reinit(&data, i, ci, pc[0], 1);
+					}
+					while(yuv[i] > pc[1]){
+						++pc[1];
+						cmv_reinit(&data, i, ci, pc[1], 1);
+					}
+					
+					//printf("%d %d %d",yuv[i],pc[0],pc[1]);
+				}
+				
+				pc = data.th[ci] + (ch<<1);
+				print_th();
+				cvtc(src, pRGB->bits(), data.map, data.rgb);
+				
+				backvalid = 1;
+				
+				cmv_process(&data, src);
+				/*
+        		double angle[MAX_LINES];
+        		int radius[MAX_LINES];
+        		int count;
+        		
+        		edge_detection(&data, angle, radius, &count);     
+        		for (int i=0;i<MAX_LINES;i++) {
+            	if (i>=count) {
+               	right[i].x = 0;
+            	} else {
+               	printf("%f %d\n", angle[i], radius[i]);    
+               	left[i].x = 0;
+               	left[i].y = 2*(H_2 - 1 - (int)(radius[i] / sin(angle[i])));
+               	right[i].x = 2*(W_2 - 1);
+               	right[i].y = 2*(H_2 - 1 - (int)((radius[i] - (W_2 - 1)*cos(angle[i])) / sin(angle[i])));
+					} 
+				}
+				*/
+
+				int isleft = 0;
+				int isright = 0;
+				goal_detection(&data, src, &d_left, &d_right, &isleft, &isright);
+
+				cvtc(src, pRGB->bits(), data.map, data.rgb);
+
+				
+				update();
+				return;
+			}  		
+			if (!use_cmv || t < 0 || t == ci) return;
+			ci = t;
+			pc = data.th[ci] + (ch<<1);
+			print_th();
+                        cvtc(src, pRGB->bits(), data.map, data.rgb);
+			//cvtm(src, pRGB->bits(), data.map, data.remap[ci]);
+			break;
+			
+		default:
+			if(use_bp == 1) {
+				fclose(fin_bpcolor);
+				printf("Saved.");
+				exit(0);
+			}
+			break;
+	}
+	
+	update();
+	
+	
+}
+
+void window::keyPressEvent(QKeyEvent *e) {
+	int t = e->ascii();
+
+	if (t == 'r' && point_x >=0 && point_y >= 0) {
+		point_x = point_y = -1;
+		setCaption(filename);
+		update();
+		return;
+	}
+
+	if (!use_cmv || ci < 0) return;
+
+	switch (t) {
+	case 'y': //choose Y component
+		if (ch == 0) return;
+		ch = 0;
+		pc = data.th[ci];
+		print_th();
+		return;
+	case 'u': //choose U component
+		if (ch == 1) return;
+		ch = 1;
+		pc = data.th[ci] + 2;
+		print_th();
+		return;
+	case 'v': //choose V component
+		if (ch == 2) return;
+		ch = 2;
+		pc = data.th[ci] + 4;
+		print_th();
+		return;
+	case 'i': //choose next color
+		if(!reset_cmv) return;
+		ci = (ci + 1) % data.color_n;
+		pc = data.th[ci] + ch*2;
+		print_th();
+		backvalid = 0;
+		return;
+	case 'k': //choose prev color
+		if(!reset_cmv) return;
+		if(ci)
+			ci = ci - 1;
+		else
+			ci = data.color_n-1;
+		pc = data.th[ci] + ch*2;
+		print_th();
+		backvalid = 0;
+		return ;
+	case 'q': //
+		if(!reset_cmv || !backvalid) return;
+		for(int i = 0 ; i < 3 ; i ++){
+			pc = data.th[ci] + i * 2;
+			while(pc[0]<tempth[2*i]){
+				cmv_reinit(&data, i, ci, pc[0], 0);
+				pc[0]++;
+			}
+			while(pc[1]>tempth[2*i+1]){	
+				cmv_reinit(&data, i, ci, pc[1], 0);
+				pc[1]--;
+			}
+			while(pc[0] > tempth[2*i]){
+				pc[0]--;
+				cmv_reinit(&data, i, ci, pc[0], 1);				
+			}
+			while(pc[1] < tempth[2*i+1]){	
+				pc[1]++;
+				cmv_reinit(&data, i, ci, pc[1], 1);
+			}
+			
+		}
+		
+		pc = data.th[ci] + ch*2;
+		print_th();
+		backvalid = 0;
+		break;
+	case 's':
+		cmv_save(&data, cfilename);
+		return ;
+	case '1': //reduce min boundary
+		if (pc[0] == 0) return;
+		--pc[0];
+		cmv_reinit(&data, ch, ci, pc[0], 1);
+		break;
+	case '2': //increase min boundary
+		if (pc[0] == pc[1]) return;
+		++pc[0];
+		cmv_reinit(&data, ch, ci, pc[0], 0);
+		break;
+	case '3': //reduce max boundary
+		if (pc[1] == pc[0]) return;
+		--pc[1];
+		cmv_reinit(&data, ch, ci, pc[1], 0);
+		break;
+	case '4': //increase max boundary
+		if (pc[1] == 255) return;
+		++pc[1];
+		cmv_reinit(&data, ch, ci, pc[1], 1);
+		break;
+	default:
+		return;
+	}
+
+	print_th();
+	cmv_process(&data, src);
+	  /*   
+   double angle[MAX_LINES];
+   int radius[MAX_LINES];
+   int count;
+   edge_detection(&data, angle, radius, &count);  
+ 
+   for (int i=0;i<MAX_LINES;i++) {
+	if (i>=count) {
+		right[i].x = 0;
+	} else {
+		printf("%f %d\n", angle[i], radius[i]);    
+		left[i].x = 0;
+		left[i].y = 2*(H_2 - 1 - (int)(radius[i] / sin(angle[i])));
+		right[i].x = 2*(W_2 - 1);
+		right[i].y = 2*(H_2 - 1 - (int)((radius[i] - (W_2 - 1)*cos(angle[i])) / sin(angle[i])));
+		} 
+	}
+	*/
+        
+	int isleft = 0;
+	int isright = 0;
+	goal_detection(&data, src, &d_left, &d_right, &isleft, &isright);
+
+	cvtc(src, pRGB->bits(), data.map, data.rgb);
+	update();
+}
+

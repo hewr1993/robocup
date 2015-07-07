@@ -1,0 +1,22 @@
+
+大家在写代码时可以参考cli.c里的函数命名和格式规范
+输出信息尽量使用log.c里的函数mylogfd
+
+git使用简要说明
+大家可以自己创建一个分支后，在自己的分支下开发
+安装git
+sudo apt-get install git
+进入工程主目录
+cd robocup-src
+显示当前所有分支
+git branch
+添加分支 yourname
+git branch yourname
+进入 yourname 分支
+git checkout yourname
+
+大家也可以自己在网上找以下git的资料，使用git提供的更多功能
+请大家不要直接更改master分支
+
+代码写完后，打包
+make handin ID=学号

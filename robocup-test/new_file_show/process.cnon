@@ -1,0 +1,172 @@
+/*
+ *  2004 - 2007 by fzf
+ *
+ *   This program is free software; you can redistribute it and/or modify
+ *   it under the terms of the GNU General Public License as published by
+ *   the Free Software Foundation; either version 2 of the License, or
+ *   (at your option) any later version.
+ *
+ *   This program is distributed in the hope that it will be useful,
+ *   but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *   GNU General Public License for more details.
+ *
+ *   You should have received a copy of the GNU General Public License
+ *   along with this program; if not, write to the Free Software
+ *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
+ *
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
+#include "dec.h"
+#include "cmv.h"
+
+int use_cmv = 0;
+int use_bp = 0;
+int get_training_sample = 0;
+int get_calib_sample = 0;
+int sample_color_id = 0;
+int reset_cmv = 0;
+struct cmv_data data;
+int bb = 0;
+unsigned char src[YUV_SIZE];
+char *filename;
+char *cfilename;
+
+static inline void print_help(char *argv0) {
+	fprintf(stderr, "Usage: %s [option] file\n"
+		"-c s\tset color file s\n"
+		"-i i\tbpnet training for color i\n"
+		"-g i\tget training samples for color i\n"
+		"-b\tshow bounding box\n"
+		"-h\tprint this help\n"
+		"Some keys are available:\ny,u,v: choose component;\n"
+		"1 2: increase/decrease upper boundary;\n"
+		"3 4: increase/decrease lower boundary;\n"
+		"left button: choose one pixel;\n"
+		"right button: choose mapped color;\n"
+			, argv0);
+}
+
+void process(int argc, char *argv[]) {
+
+	char tmp[2];
+	char tmp2[64];
+	for (;;) {
+		int t = getopt(argc, argv, "aig:c:r:bh");
+		if (t == -1) {
+			break;
+		}
+
+		switch (t) {
+			case 'r':
+				reset_cmv = 1;
+			case 'c':
+				if (sscanf(optarg, "%s", tmp2) != 1) {
+					fprintf(stderr, "error optarg: %s\n", optarg);
+					exit(-1);
+				}
+				cfilename = argv[2];
+				use_cmv = 1;
+				break;
+			case 'b':
+				bb = 1;
+				break;
+			case 'h':
+				print_help(argv[0]);
+				exit(0);
+			case '?':
+				break;
+			//added by hjw
+			case 'i':
+				//for bpnet training
+				printf("Use bp.\n");
+				use_bp = 1;
+				if (sscanf(optarg, "%s", tmp) != 1) {
+					fprintf(stderr, "error optarg: %s\n", optarg);
+					exit(-1);
+				}
+				sample_color_id = atoi(tmp);
+				break;
+			case 'a':
+				get_calib_sample = 1;
+				break;
+			case 'g':
+				//get training samples
+				printf("get training samples.\n");
+				get_training_sample = 1;
+				if (sscanf(optarg, "%s", tmp) != 1) {
+					fprintf(stderr, "error optarg: %s\n", optarg);
+					exit(-1);
+				}
+				sample_color_id = atoi(tmp);
+				break;
+			default:
+				fprintf(stderr, "error option: %d\n", t);
+				exit(-1);
+		}
+	}
+
+	if (argc - optind != 1 && use_bp != 1 && get_training_sample != 1 && get_calib_sample != 1) {
+		
+		print_help(argv[0]);
+		exit(-1);
+	}
+
+	filename = argv[optind];
+
+	int fd = open(filename, O_RDONLY);
+	if (fd < 0) {
+		perror(filename);
+		exit(-1);
+	}
+	
+	int filelength=lseek(fd,0,SEEK_END);
+
+	char *suffix = strrchr(filename, '.');
+	if (suffix == NULL) {
+		fprintf(stderr, "unknown filename: %s\n", filename);
+		exit(-1);
+	}
+	++suffix;
+
+	if (!strcmp(suffix, "raw")) {
+		unsigned char *raw = mmap(NULL, RAW_SIZE, PROT_READ, MAP_SHARED, fd, 0);
+		if (raw == MAP_FAILED) {
+			perror("mmap");
+			exit(-1);
+		}
+		dec_init(W,H,R);
+		dec_process(raw, src);
+	}
+	else if (!strcmp(suffix, "yuv")) {
+		unsigned ori= mmap(NULL, YUV_SIZE, PROT_READ, MAP_SHARED, fd, 0);
+		if (ori == MAP_FAILED) {
+			perror("mmap");
+			exit(-1);
+		}
+		memcpy(src,ori,YUV_SIZE);
+		//dec_init(W,H,R);
+		//dec_process(raw, src,W,H,R);
+	}
+	else {
+		fprintf(stderr, "unknown filename: %s\n", filename);
+		exit(-1);
+	}
+
+	if (use_cmv) {
+		cmv_init(&data, cfilename);
+		printf("using color file %s\n", cfilename);
+		cmv_process(&data, src);
+	}
+}
+

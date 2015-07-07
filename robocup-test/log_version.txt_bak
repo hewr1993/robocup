@@ -1,0 +1,6 @@
+begin
+[Version] Using video0 video1 (framerate 10)
+[Version] Using ip 127.0.0.1 port 8000 8001
+[Version|Pro|pro_init] Door_near_threshold 18
+[Version|Pro|pro_init] Door_near_threshold 18
+[Version] Begin to capture
