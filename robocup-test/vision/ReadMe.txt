@@ -1,15 +1,15 @@
-Õâ¸öÎÄ¼þ¼ÐÏÂÊÇÊÓÆµ´¦Àí³ÌÐò
+è¿™ä¸ªæ–‡ä»¶å¤¹ä¸‹æ˜¯è§†é¢‘å¤„ç†ç¨‹åº
 
-Ò»¡¢ÖØÒªÎÄ¼þËµÃ÷
-cap2_net.c		Ö÷³ÌÐò
-process.c		ÊÓÆµ´¦ÀíÎÄ¼þ£¬ÓÃµ½µÄËùÓÐº¯Êý¾ùÔÚlibrobot/cmv.cÖÐ
-colors0.txt,colors1.txt ÑÕÉ«ãÐÖµÎÄ¼þ
-translate.conf		×ª»»¾ØÕóÎÄ¼þ£¬½¨Òé±£Áô
+ä¸€ã€é‡è¦æ–‡ä»¶è¯´æ˜Ž
+cap2_net.c		ä¸»ç¨‹åº
+process.c		è§†é¢‘å¤„ç†æ–‡ä»¶ï¼Œç”¨åˆ°çš„æ‰€æœ‰å‡½æ•°å‡åœ¨librobot/cmv.cä¸­
+colors0.txt,colors1.txt é¢œè‰²é˜ˆå€¼æ–‡ä»¶
+translate.conf		è½¬æ¢çŸ©é˜µæ–‡ä»¶ï¼Œå»ºè®®ä¿ç•™
 
-¶þ¡¢Æô¶¯ËµÃ÷
+äºŒã€å¯åŠ¨è¯´æ˜Ž
 
-Ö±½Ó./videocap -a IP£¬IPÎªÄãÒª·¢ËÍµÄÖ÷»úIP
+ç›´æŽ¥./videocap -a IPï¼ŒIPä¸ºä½ è¦å‘é€çš„ä¸»æœºIP
 
-Èý¡¢¼òÒªËµÃ÷
+ä¸‰ã€ç®€è¦è¯´æ˜Ž
 
-ÎÒÃÇ×éµÄÏë·¨ÊÇ½«ÊÓÆµ´¦Àíº¯Êý·â×°³É¿â£¬ËùÒÔ»ù±¾ËùÓÐÊÓÆµ´¦Àíº¯Êý¶¼ÔÚlibrobot/cmv.cÖÐ
+æˆ‘ä»¬ç»„çš„æƒ³æ³•æ˜¯å°†è§†é¢‘å¤„ç†å‡½æ•°å°è£…æˆåº“ï¼Œæ‰€ä»¥åŸºæœ¬æ‰€æœ‰è§†é¢‘å¤„ç†å‡½æ•°éƒ½åœ¨librobot/cmv.cä¸­
